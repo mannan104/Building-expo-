@@ -17,10 +17,20 @@
 # stamped by a licensed structural engineer.
 
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
+
+try:
+    import pandas as pd
+    import numpy as np
+    import plotly.graph_objects as go
+    import plotly.express as px
+except ModuleNotFoundError as missing_pkg_error:
+    st.error(
+        f"Missing package: {missing_pkg_error}. \n\n"
+        "This means requirements.txt was not installed for this deployment. "
+        "Check that requirements.txt sits in the SAME folder as app.py at your "
+        "repo root, then open 'Manage app' (bottom right) and click 'Reboot app'."
+    )
+    st.stop()
 
 # -----------------------------------------------------------------------
 # PAGE CONFIG
