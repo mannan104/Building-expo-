@@ -4,7 +4,8 @@
 # Given soil type, plot dimensions, floor count and material choices, the
 # app auto-generates:
 #   - A soil and foundation cross-section diagram
-#   - An interactive 3D building shape model (foundation, floors, roof)
+#   - A 3D building shape model (foundation, floors, roof) with adjustable
+#     view angle
 #   - Recommended concrete grade, nominal mix ratio and water-cement ratio
 #   - Material quantity estimates (cement, sand, aggregate, water)
 #   - A downloadable planning summary report
@@ -21,8 +22,9 @@ import streamlit as st
 try:
     import pandas as pd
     import numpy as np
-    import plotly.graph_objects as go
-    import plotly.express as px
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 except ModuleNotFoundError as missing_pkg_error:
     st.error(
         f"Missing package: {missing_pkg_error}. \n\n"
@@ -232,9 +234,12 @@ WALL_MATERIALS = {
 DRY_VOLUME_FACTOR = 1.54
 CEMENT_DENSITY_KG_M3 = 1440
 LOAD_PER_FLOOR_KPA = 12.0          # rough combined dead+live load assumption
-CONCRETE_FACTOR_M3_PER_M2 = 0.17   # rough structural concrete per m² floor area
+CONCRETE_FACTOR_M3_PER_M2 = 0.17   # rough structural concrete per m2 floor area
 
 FLOOR_COLOR_SCALE = ["#d97b3f", "#e0973c", "#e8b25a", "#2fbfa0", "#3fd6b8", "#5eead4"]
+
+PANEL_BG = "#171410"
+TEXT_COLOR = "#e6ded2"
 
 
 def recommend_grade(floors: int) -> str:
@@ -262,34 +267,66 @@ def compute_materials(volume_m3, ratio, wc):
     }
 
 
-def box_mesh(x0, x1, y0, y1, z0, z1, color, opacity=1.0, name=None):
-    x = [x0, x1, x1, x0, x0, x1, x1, x0]
-    y = [y0, y0, y1, y1, y0, y0, y1, y1]
-    z = [z0, z0, z0, z0, z1, z1, z1, z1]
-    i = [0, 0, 4, 4, 0, 0, 3, 3, 0, 1, 2, 1]
-    j = [1, 2, 5, 6, 1, 5, 2, 6, 3, 2, 6, 5]
-    k = [2, 3, 6, 7, 5, 4, 6, 7, 7, 6, 7, 6]
-    return go.Mesh3d(x=x, y=y, z=z, i=i, j=j, k=k, color=color, opacity=opacity,
-                      flatshading=True, name=name, showscale=False, hoverinfo="name")
+def box_faces(x0, x1, y0, y1, z0, z1):
+    v = {
+        "000": (x0, y0, z0), "100": (x1, y0, z0), "110": (x1, y1, z0), "010": (x0, y1, z0),
+        "001": (x0, y0, z1), "101": (x1, y0, z1), "111": (x1, y1, z1), "011": (x0, y1, z1),
+    }
+    return [
+        [v["000"], v["100"], v["110"], v["010"]],  # bottom
+        [v["001"], v["101"], v["111"], v["011"]],  # top
+        [v["000"], v["100"], v["101"], v["001"]],  # front (y0)
+        [v["010"], v["110"], v["111"], v["011"]],  # back (y1)
+        [v["000"], v["010"], v["011"], v["001"]],  # left (x0)
+        [v["100"], v["110"], v["111"], v["101"]],  # right (x1)
+    ]
 
 
-def rect_outline(x0, x1, y0, y1, z, color):
-    xs = [x0, x1, x1, x0, x0]
-    ys = [y0, y0, y1, y1, y0]
-    zs = [z] * 5
-    return go.Scatter3d(x=xs, y=ys, z=zs, mode="lines",
-                         line=dict(color=color, width=4), showlegend=False, hoverinfo="skip")
+def add_box(ax, x0, x1, y0, y1, z0, z1, color, alpha=1.0):
+    poly = Poly3DCollection(box_faces(x0, x1, y0, y1, z0, z1),
+                             facecolor=color, edgecolor="#241f19", linewidths=0.4, alpha=alpha)
+    ax.add_collection3d(poly)
 
 
-def gable_roof_mesh(L, W, z_base, apex_height, color):
-    x = [0, L, L, 0, 0, L]
-    y = [0, 0, W, W, W / 2, W / 2]
-    z = [z_base, z_base, z_base, z_base, z_base + apex_height, z_base + apex_height]
-    i = [0, 0, 3, 3, 0, 1]
-    j = [1, 5, 2, 5, 3, 2]
-    k = [5, 4, 5, 4, 4, 5]
-    return go.Mesh3d(x=x, y=y, z=z, i=i, j=j, k=k, color=color, opacity=1.0,
-                      flatshading=True, name="Roof", showscale=False, hoverinfo="name")
+def add_gable_roof(ax, L, W, z_base, apex_height, color):
+    p0 = (0, 0, z_base); p1 = (L, 0, z_base); p2 = (L, W, z_base); p3 = (0, W, z_base)
+    r0 = (0, W / 2, z_base + apex_height); r1 = (L, W / 2, z_base + apex_height)
+    faces = [
+        [p0, p1, r1, r0],  # front slope
+        [p3, p2, r1, r0],  # back slope
+        [p0, p3, r0],      # left gable end (triangle)
+        [p1, p2, r1],      # right gable end (triangle)
+    ]
+    poly = Poly3DCollection(faces, facecolor=color, edgecolor="#241f19", linewidths=0.4, alpha=1.0)
+    ax.add_collection3d(poly)
+
+
+def style_fig(fig):
+    fig.patch.set_facecolor(PANEL_BG)
+    fig.patch.set_alpha(0.0)
+
+
+def style_2d_axis(ax):
+    ax.set_facecolor(PANEL_BG)
+    ax.set_facecolor((0, 0, 0, 0))
+    for spine in ax.spines.values():
+        spine.set_color("#4a4038")
+    ax.tick_params(colors=TEXT_COLOR)
+    ax.title.set_color(TEXT_COLOR)
+    ax.xaxis.label.set_color(TEXT_COLOR)
+    ax.yaxis.label.set_color(TEXT_COLOR)
+
+
+def style_3d_axis(ax):
+    ax.set_facecolor((0, 0, 0, 0))
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.set_facecolor((1, 1, 1, 0.03))
+        pane.set_edgecolor((1, 1, 1, 0.08))
+    ax.tick_params(colors=TEXT_COLOR)
+    ax.xaxis.label.set_color(TEXT_COLOR)
+    ax.yaxis.label.set_color(TEXT_COLOR)
+    ax.zaxis.label.set_color(TEXT_COLOR)
+    ax.title.set_color(TEXT_COLOR)
 
 
 # -----------------------------------------------------------------------
@@ -327,6 +364,10 @@ with st.sidebar:
     else:
         grade = None  # resolved after floors known
 
+    st.markdown("### 3D View Angle")
+    view_azim = st.slider("Rotate (azimuth)", 0, 360, 235)
+    view_elev = st.slider("Tilt (elevation)", 5, 80, 20)
+
     st.markdown("---")
     run = st.button("Generate Building Design", use_container_width=True)
 
@@ -341,6 +382,7 @@ soil = SOIL_DATA[soil_type]
 sbc_low, sbc_high = soil["sbc"]
 sbc_avg = (sbc_low + sbc_high) / 2
 depth_low, depth_high = soil["depth_m"]
+depth_mid = (depth_low + depth_high) / 2
 
 if grade is None:
     grade = recommend_grade(floors)
@@ -405,34 +447,38 @@ with tab1:
         """, unsafe_allow_html=True)
 
     with colB:
-        depth_mid = (depth_low + depth_high) / 2
-        fig1 = go.Figure()
+        fig1, ax1 = plt.subplots(figsize=(6.2, 4.6))
+        style_fig(fig1)
+        style_2d_axis(ax1)
+
         # soil block
-        fig1.add_shape(type="rect", x0=-1, x1=plot_length + 1, y0=-depth_mid - 1, y1=0,
-                        fillcolor=soil["color"], line=dict(width=0), opacity=0.55)
+        ax1.add_patch(Rectangle((-1, -depth_mid - 1), plot_length + 2, depth_mid + 1,
+                                 facecolor=soil["color"], alpha=0.55, edgecolor="none"))
         # ground level line
-        fig1.add_shape(type="line", x0=-1, x1=plot_length + 1, y0=0, y1=0,
-                        line=dict(color="#2fbfa0", width=3))
+        ax1.axhline(0, color="#2fbfa0", linewidth=3, zorder=5)
+
         # footing block
         footing_width = min(plot_length, max(2.0, (required_footing_area / plot_width)))
         fx0 = (plot_length - footing_width) / 2
-        fig1.add_shape(type="rect", x0=fx0, x1=fx0 + footing_width, y0=-depth_mid, y1=-depth_mid + 0.35,
-                        fillcolor="#8f9295", line=dict(color="#e6ded2", width=1))
+        ax1.add_patch(Rectangle((fx0, -depth_mid), footing_width, 0.35,
+                                 facecolor="#8f9295", edgecolor=TEXT_COLOR, linewidth=1, zorder=6))
         # plinth / column stub above footing to ground
-        fig1.add_shape(type="rect", x0=fx0 + footing_width * 0.35, x1=fx0 + footing_width * 0.65,
-                        y0=-depth_mid + 0.35, y1=0, fillcolor="#d97b3f", line=dict(width=0))
+        ax1.add_patch(Rectangle((fx0 + footing_width * 0.35, -depth_mid + 0.35),
+                                 footing_width * 0.3, depth_mid - 0.35,
+                                 facecolor="#d97b3f", edgecolor="none", zorder=6))
         # building base above ground
-        fig1.add_shape(type="rect", x0=0, x1=plot_length, y0=0, y1=floor_height * 0.6,
-                        fillcolor=WALL_MATERIALS[wall_material], opacity=0.5, line=dict(color="#e6ded2", width=1))
+        ax1.add_patch(Rectangle((0, 0), plot_length, floor_height * 0.6,
+                                 facecolor=WALL_MATERIALS[wall_material], alpha=0.5,
+                                 edgecolor=TEXT_COLOR, linewidth=1, zorder=4))
 
-        fig1.update_layout(
-            title="Soil & Foundation Cross-Section (side view)",
-            xaxis=dict(title="Length (m)", range=[-1, plot_length + 1], showgrid=False),
-            yaxis=dict(title="Depth (m)", range=[-depth_mid - 1, floor_height * 0.6 + 0.5], showgrid=False),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#e6ded2"), height=420, margin=dict(l=10, r=10, t=40, b=10),
-        )
-        st.plotly_chart(fig1, use_container_width=True)
+        ax1.set_xlim(-1, plot_length + 1)
+        ax1.set_ylim(-depth_mid - 1, floor_height * 0.6 + 0.5)
+        ax1.set_xlabel("Length (m)")
+        ax1.set_ylabel("Depth (m)")
+        ax1.set_title("Soil & Foundation Cross-Section (side view)")
+        ax1.grid(False)
+        st.pyplot(fig1, use_container_width=True)
+        plt.close(fig1)
         st.caption(f"Schematic footing width shown: {footing_width:.1f} m (derived from required footing area). Not an exact structural design.")
 
 # -----------------------------------------------------------------------
@@ -441,54 +487,54 @@ with tab1:
 with tab2:
     st.markdown("""
     <div class="eng-card">
-        <h3>Interactive 3D Building Shape</h3>
-        <p>Drag to rotate, scroll to zoom. The model reflects your plot size, floor count, floor height, roof type and wall material color.</p>
+        <h3>3D Building Shape</h3>
+        <p>Use the rotate and tilt sliders in the sidebar to view the model from different angles. The model reflects your plot size, floor count, floor height, roof type and wall material color.</p>
     </div>
     """, unsafe_allow_html=True)
 
     L, W, n, fh = plot_length, plot_width, int(floors), floor_height
-    fig3d = go.Figure()
-
-    # ground plane
     margin = max(L, W) * 0.25
-    fig3d.add_trace(box_mesh(-margin, L + margin, -margin, W + margin, -0.05, 0, soil["color"], opacity=0.9, name="Ground"))
+    found_top = -depth_mid
+    roof_base = n * fh
+    apex_h = max(1.0, W * 0.35) if roof_type == "Gable" else 0.0
+    total_top = roof_base + (apex_h if roof_type == "Gable" else 0.3)
+
+    fig2 = plt.figure(figsize=(8, 6.5))
+    style_fig(fig2)
+    ax2 = fig2.add_subplot(111, projection="3d")
+    style_3d_axis(ax2)
+
+    # ground plane (thin box)
+    add_box(ax2, -margin, L + margin, -margin, W + margin, -0.05, 0, soil["color"], alpha=0.85)
 
     # foundation block below ground
-    found_top = -((depth_low + depth_high) / 2)
-    fig3d.add_trace(box_mesh(0, L, 0, W, found_top, found_top + 0.4, "#8f9295", opacity=0.95, name="Foundation"))
+    add_box(ax2, 0, L, 0, W, found_top, found_top + 0.4, "#8f9295", alpha=0.95)
 
     # floors
     wall_color = WALL_MATERIALS[wall_material]
     for i in range(n):
         z0, z1 = i * fh, (i + 1) * fh
         color = FLOOR_COLOR_SCALE[i % len(FLOOR_COLOR_SCALE)] if n > 1 else wall_color
-        fig3d.add_trace(box_mesh(0, L, 0, W, z0, z1, wall_color if n <= 1 else color, opacity=0.88, name=f"Floor {i+1}"))
-        fig3d.add_trace(rect_outline(0, L, 0, W, z1, "#f3ede4"))
-    fig3d.add_trace(rect_outline(0, L, 0, W, 0, "#f3ede4"))
+        add_box(ax2, 0, L, 0, W, z0, z1, wall_color if n <= 1 else color, alpha=0.9)
 
     # roof
-    roof_base = n * fh
     if roof_type == "Flat":
-        fig3d.add_trace(box_mesh(0, L, 0, W, roof_base, roof_base + 0.3, "#3a2f26", opacity=1.0, name="Roof"))
+        add_box(ax2, 0, L, 0, W, roof_base, roof_base + 0.3, "#3a2f26", alpha=1.0)
     else:
-        apex_h = max(1.0, W * 0.35)
-        fig3d.add_trace(gable_roof_mesh(L, W, roof_base, apex_h, "#7a3b28"))
+        add_gable_roof(ax2, L, W, roof_base, apex_h, "#7a3b28")
 
-    fig3d.update_layout(
-        scene=dict(
-            xaxis=dict(title="Length (m)", backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(230,222,210,0.15)"),
-            yaxis=dict(title="Width (m)", backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(230,222,210,0.15)"),
-            zaxis=dict(title="Height (m)", backgroundcolor="rgba(0,0,0,0)", gridcolor="rgba(230,222,210,0.15)"),
-            aspectmode="data",
-            camera=dict(eye=dict(x=1.5, y=-1.6, z=1.0)),
-        ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#e6ded2"),
-        height=560,
-        margin=dict(l=0, r=0, t=10, b=0),
-        showlegend=False,
-    )
-    st.plotly_chart(fig3d, use_container_width=True)
+    ax2.set_xlim(-margin, L + margin)
+    ax2.set_ylim(-margin, W + margin)
+    ax2.set_zlim(found_top - 0.5, total_top + 0.5)
+    ax2.set_box_aspect((L + 2 * margin, W + 2 * margin, (total_top - found_top) + 1))
+    ax2.view_init(elev=view_elev, azim=view_azim)
+    ax2.set_xlabel("Length (m)")
+    ax2.set_ylabel("Width (m)")
+    ax2.set_zlabel("Height (m)")
+    ax2.set_title("3D Building Massing Model")
+
+    st.pyplot(fig2, use_container_width=True)
+    plt.close(fig2)
     st.caption("Model is a schematic massing study (footprint, floor count, roof form) - not an architectural or structural drawing.")
 
 # -----------------------------------------------------------------------
@@ -514,11 +560,18 @@ with tab3:
         st.dataframe(grade_df, use_container_width=True, hide_index=True)
     with colB:
         if mix["ratio"]:
-            fig_pie = px.pie(names=["Cement", "Sand", "Aggregate"], values=mix["ratio"], hole=0.45,
-                              color_discrete_sequence=["#d97b3f", "#f2a65a", "#2fbfa0"])
-            fig_pie.update_layout(title=f"{grade} Mix Composition", paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#e6ded2"), height=380)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            fig3, ax3 = plt.subplots(figsize=(5, 4.6))
+            style_fig(fig3)
+            wedges, texts, autotexts = ax3.pie(
+                mix["ratio"], labels=["Cement", "Sand", "Aggregate"],
+                colors=["#d97b3f", "#f2a65a", "#2fbfa0"],
+                autopct="%1.0f%%", pctdistance=0.8,
+                wedgeprops=dict(width=0.55, edgecolor=PANEL_BG),
+                textprops=dict(color=TEXT_COLOR),
+            )
+            ax3.set_title(f"{grade} Mix Composition", color=TEXT_COLOR)
+            st.pyplot(fig3, use_container_width=True)
+            plt.close(fig3)
         else:
             st.warning("M30 requires a lab-designed mix - no fixed nominal ratio to chart.")
 
